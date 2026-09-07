@@ -138,3 +138,16 @@ between discs — swap the blank and press **Enter**) · **Esc** back ·
 - CD-Text display depends entirely on the car head unit supporting it —
   plenty of factory units, especially older/base ones, just ignore it. The
   audio itself is unaffected either way.
+
+### Troubleshooting: `HTTP Error 403: Forbidden` on every track
+
+YouTube's anti-bot checks change often, and yt-dlp ships fixes for them
+constantly — an old yt-dlp binary is the #1 cause of blanket 403s. The app
+already asks yt-dlp to try the `android` player client (usually the least
+restricted) before falling back to `web`, but if you're still seeing 403s:
+
+- Update yt-dlp. If it's a standalone `.exe` (not from a package manager),
+  just run `yt-dlp.exe -U` — it self-updates in place.
+- If that doesn't help, it's likely a genuinely restricted video (age-gated,
+  region-locked, or otherwise requires being logged in) rather than a
+  blanket block — those aren't something this tool works around.

@@ -149,7 +149,17 @@ pub fn download_track(track: &Track, out_dir: &Path) -> Result<(PathBuf, TrackTa
     let base = sanitize(&track.id);
     let out_template = out_dir.join(format!("{base}.%(ext)s"));
 
-    let status = Command::new("yt-dlp")
+    // .output() (not .status()): yt-dlp writes its own progress bar straight
+    // to the terminal, and inheriting stdio while our TUI owns the
+    // alternate screen makes the two collide into garbled, overlapping
+    // text. Capturing it keeps the screen clean and lets us surface the
+    // *real* failure reason (e.g. an HTTP 403) instead of a generic one.
+    //
+    // --extractor-args player_client=... : YouTube's anti-bot checks are
+    // stricter for some player clients than others, and which one gets
+    // blocked changes over time — trying android first (rarely blocked),
+    // falling back to web, avoids most "HTTP Error 403: Forbidden" runs.
+    let out = Command::new("yt-dlp")
         .args([
             "-f",
             "bestaudio/best",
@@ -161,16 +171,25 @@ pub fn download_track(track: &Track, out_dir: &Path) -> Result<(PathBuf, TrackTa
             "--postprocessor-args",
             "ffmpeg:-ar 44100 -ac 2 -sample_fmt s16",
             "--write-info-json",
+            "--extractor-args",
+            "youtube:player_client=android,web",
             "--no-warnings",
+            "--quiet",
+            "--no-progress",
             "-o",
         ])
         .arg(&out_template)
         .arg(track.url())
-        .status()
+        .output()
         .context("failed to launch yt-dlp for download")?;
 
-    if !status.success() {
-        bail!("yt-dlp failed to download \"{}\"", track.title);
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!(
+            "yt-dlp failed to download \"{}\":\n{}",
+            track.title,
+            stderr.trim()
+        );
     }
 
     let wav_path = out_dir.join(format!("{base}.wav"));

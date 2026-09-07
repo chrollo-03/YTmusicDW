@@ -46,16 +46,22 @@ pub fn burn(tracks: &[BurnTrack], disc_num: usize, progress: &dyn Fn(&str)) -> R
         tracks.len()
     ));
 
-    let status = Command::new("cdrdao")
+    // .output(), not .status(): cdrdao's own progress writes would
+    // otherwise collide with the TUI's alternate screen.
+    let out = Command::new("cdrdao")
         .args(["write", "--eject"])
         .arg(&toc_path)
-        .status()
+        .output()
         .context("failed to launch cdrdao")?;
 
     let _ = std::fs::remove_file(&toc_path);
 
-    if !status.success() {
-        bail!("cdrdao exited with an error — check that a blank CD-R is inserted and the drive isn't in use");
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!(
+            "cdrdao exited with an error — check that a blank CD-R is inserted and the drive isn't in use:\n{}",
+            stderr.trim()
+        );
     }
     progress("Burn complete, disc ejected.");
     Ok(())

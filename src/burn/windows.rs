@@ -70,11 +70,18 @@ pub fn burn(tracks: &[BurnTrack], disc_num: usize, total_discs: usize, progress:
         .join(",");
     cmd.arg(joined);
 
-    let status = cmd.status().context("failed to launch PowerShell burn script")?;
+    // .output(), not .status(): PowerShell's own console writes would
+    // otherwise collide with the TUI's alternate screen.
+    let out = cmd.output().context("failed to launch PowerShell burn script")?;
     let _ = std::fs::remove_dir_all(&tmp_dir);
 
-    if !status.success() {
-        bail!("burn script exited with an error (see PowerShell output above)");
+    if !out.status.success() {
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        bail!("burn script exited with an error:\n{}", combined.trim());
     }
     progress("Burn complete. Ejecting disc.");
     Ok(())
