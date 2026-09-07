@@ -85,10 +85,23 @@ impl Default for App {
     }
 }
 
+/// Downloads live in a `downloads/` folder next to the running exe, not
+/// %TEMP% — the exe is often run from wherever it was copied to (e.g. an
+/// external drive, or straight off a USB stick moved between machines), and
+/// files quietly vanishing into a temp folder on a *different* machine than
+/// the one you're burning on is the opposite of useful. Falls back to a
+/// temp dir only if the exe's own location isn't writable/discoverable.
+fn default_out_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("downloads")))
+        .unwrap_or_else(|| std::env::temp_dir().join("ytmusicdw-downloads"))
+}
+
 impl App {
     pub fn new() -> Self {
         let (tx, rx) = channel();
-        let out_dir = std::env::temp_dir().join("ytmusicdw-downloads");
+        let out_dir = default_out_dir();
         Self {
             screen: Screen::UrlInput,
             url_input: String::new(),

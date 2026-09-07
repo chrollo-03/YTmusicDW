@@ -146,7 +146,7 @@ pub fn list_playlist(url: &str) -> Result<Vec<Track>> {
 /// plain videos) can be pulled back into the UI and CD-Text.
 pub fn download_track(track: &Track, out_dir: &Path) -> Result<(PathBuf, TrackTags)> {
     std::fs::create_dir_all(out_dir)?;
-    let base = sanitize(&track.id);
+    let base = readable_stem(track);
     let out_template = out_dir.join(format!("{base}.%(ext)s"));
 
     // .output() (not .status()): yt-dlp writes its own progress bar straight
@@ -216,8 +216,39 @@ fn read_info_json_tags(path: &Path) -> TrackTags {
     }
 }
 
-fn sanitize(id: &str) -> String {
-    id.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .collect()
+/// Builds a filesystem-safe, human-readable base filename like
+/// "Song Title - Artist [dQw4w9WgXcQ].wav" instead of the bare video ID.
+/// The trailing `[id]` is what actually guarantees uniqueness (two tracks
+/// can share a title) — the readable part in front is just for you.
+fn readable_stem(track: &Track) -> String {
+    let title = sanitize_filename_part(&track.title);
+    let artist = sanitize_filename_part(track.artist_label());
+    let readable = if title.is_empty() {
+        "untitled".to_string()
+    } else {
+        format!("{title} - {artist}")
+    };
+    format!("{} [{}]", truncate_chars(&readable, 80), track.id)
+}
+
+/// Strips characters Windows/most filesystems reject in a filename, and
+/// trailing dots/spaces (also illegal on Windows).
+fn sanitize_filename_part(s: &str) -> String {
+    let cleaned: String = s
+        .chars()
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect();
+    cleaned.trim().trim_end_matches('.').to_string()
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        s.chars().take(max).collect()
+    }
 }
