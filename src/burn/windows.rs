@@ -1,7 +1,12 @@
 //! Windows backend: strips WAV headers to raw 44.1kHz/16-bit/stereo PCM
 //! (what IMAPI2's Track-At-Once API expects) and hands them to
 //! `scripts/burn_audio_cd.ps1`, which drives IMAPI2 via COM.
+//!
+//! IMAPI2 has no practical public API for writing CD-Text, so this path
+//! burns audio-only and instead writes a plain-text tracklist next to the
+//! source WAVs — print it and drop it in the CD case.
 
+use super::BurnTrack;
 use anyhow::{bail, Context, Result};
 use std::env;
 use std::path::{Path, PathBuf};
@@ -24,31 +29,40 @@ fn run_probe_script() -> Result<bool> {
     Ok(n > 0)
 }
 
-pub fn burn(wav_tracks: &[PathBuf], progress: &dyn Fn(&str)) -> Result<()> {
+pub fn burn(tracks: &[BurnTrack], disc_num: usize, total_discs: usize, progress: &dyn Fn(&str)) -> Result<()> {
     if !recorder_present() {
         bail!("no CD/DVD recorder detected by Windows (IMAPI2). Plug in the burner and insert a blank CD-R.");
     }
 
+    if let Some(parent) = tracks.first().and_then(|t| t.path.parent()) {
+        if let Err(e) = write_tracklist(parent, tracks, disc_num) {
+            progress(&format!("(couldn't write tracklist.txt: {e})"));
+        } else {
+            progress(&format!(
+                "Note: Windows burning has no CD-Text support — wrote disc{disc_num}_tracklist.txt next to your downloads to print instead."
+            ));
+        }
+    }
+
     progress("Converting tracks to raw CD-audio PCM...");
-    let tmp_dir = env::temp_dir().join(format!("ytmusicdw-burn-{}", std::process::id()));
+    let tmp_dir = env::temp_dir().join(format!("ytmusicdw-burn-{}-{disc_num}", std::process::id()));
     std::fs::create_dir_all(&tmp_dir)?;
 
-    let mut raw_paths = Vec::with_capacity(wav_tracks.len());
-    for (i, wav) in wav_tracks.iter().enumerate() {
+    let mut raw_paths = Vec::with_capacity(tracks.len());
+    for (i, t) in tracks.iter().enumerate() {
         let raw_path = tmp_dir.join(format!("track_{i:03}.raw"));
-        strip_wav_to_raw(wav, &raw_path)
-            .with_context(|| format!("converting {} for burning", wav.display()))?;
+        strip_wav_to_raw(&t.path, &raw_path)
+            .with_context(|| format!("converting {} for burning", t.path.display()))?;
         raw_paths.push(raw_path);
     }
 
     let script = locate_burn_script()?;
-    progress("Handing tracks to Windows IMAPI2 (this can take a few minutes)...");
+    progress(&format!("Handing disc {disc_num}/{total_discs} to Windows IMAPI2 (this can take a few minutes)..."));
 
     let mut cmd = Command::new("powershell");
     cmd.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
         .arg(&script)
         .arg("-TrackFiles");
-    // PowerShell array param: pass comma-joined, script splits on ','
     let joined = raw_paths
         .iter()
         .map(|p| p.to_string_lossy().to_string())
@@ -63,6 +77,18 @@ pub fn burn(wav_tracks: &[PathBuf], progress: &dyn Fn(&str)) -> Result<()> {
         bail!("burn script exited with an error (see PowerShell output above)");
     }
     progress("Burn complete. Ejecting disc.");
+    Ok(())
+}
+
+fn write_tracklist(dir: &Path, tracks: &[BurnTrack], disc_num: usize) -> Result<()> {
+    let mut out = format!("ytmusicdw — disc {disc_num} tracklist\n{}\n\n", "-".repeat(32));
+    for (i, t) in tracks.iter().enumerate() {
+        match &t.album {
+            Some(album) => out.push_str(&format!("{:>2}. {} — {} [{album}]\n", i + 1, t.title, t.artist)),
+            None => out.push_str(&format!("{:>2}. {} — {}\n", i + 1, t.title, t.artist)),
+        }
+    }
+    std::fs::write(dir.join(format!("disc{disc_num}_tracklist.txt")), out)?;
     Ok(())
 }
 

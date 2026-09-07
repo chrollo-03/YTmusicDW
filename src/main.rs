@@ -105,6 +105,9 @@ fn handle_key(app: &mut App, code: KeyCode) {
             KeyCode::Char('d') => app.start_download_selected(),
             KeyCode::Char('b') => app.start_burn(),
             KeyCode::Char('c') => app.cycle_disc_capacity(),
+            KeyCode::Char(']') => app.inc_target_discs(),
+            KeyCode::Char('[') => app.dec_target_discs(),
+            KeyCode::Char('0') => app.reset_target_discs(),
             _ => {}
         },
         Screen::Working => {

@@ -1,5 +1,6 @@
+use crate::burn::BurnTrack;
+use crate::ytdlp::{Track, TrackTags};
 use crate::{burn, convert, ytdlp};
-use crate::ytdlp::Track;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
@@ -29,7 +30,7 @@ pub struct TrackItem {
 pub enum WorkerMsg {
     Log(String),
     FetchDone(Result<Vec<Track>, String>),
-    TrackDownloaded(usize, PathBuf, u64),
+    TrackDownloaded(usize, PathBuf, u64, TrackTags),
     TrackFailed(usize, String),
     DownloadBatchDone,
     /// Burn thread finished disc `n` (1-based) of `total` and is waiting for
@@ -44,6 +45,17 @@ pub enum WorkerMsg {
 /// either fails outright or relies on unsupported overburning.
 pub const CAPACITY_PRESETS_MIN: [u64; 3] = [74, 80, 90];
 
+/// Standard Red Book minimum pause between audio tracks. Counted against
+/// each disc's budget so packing doesn't quietly assume zero-gap tracks.
+const TRACK_GAP_SECS: u64 = 2;
+
+/// Headroom below a disc's nominal rated capacity: real blanks vary slightly
+/// from their nominal rating, and lead-in/lead-out eats into the writable
+/// area. Staying under this margin is what "100% burnable" actually means —
+/// packing right up to the literal 80:00 boundary is how you get a disc that
+/// fails during finalization.
+const SAFETY_BUFFER_SECS: u64 = 30;
+
 pub struct App {
     pub screen: Screen,
     pub url_input: String,
@@ -54,9 +66,11 @@ pub struct App {
     pub should_quit: bool,
     pub busy: bool,
     pub error: Option<String>,
-    /// Per-disc capacity, in seconds. Selected tracks are greedily packed
-    /// into discs of this size, in playlist order.
+    /// Per-disc nominal capacity, in seconds (before gap/safety deductions).
     pub disc_capacity_secs: u64,
+    /// Hard cap on how many discs the current selection is allowed to need.
+    /// None = auto (as many discs as it takes).
+    pub target_disc_count: Option<usize>,
     /// Set while the burn thread has finished one disc and is blocked
     /// waiting for the user to insert the next blank. (next_disc, total_discs)
     pub awaiting_swap: Option<(usize, usize)>,
@@ -86,6 +100,7 @@ impl App {
             busy: false,
             error: None,
             disc_capacity_secs: burn::MAX_CD_SECONDS,
+            target_disc_count: None,
             awaiting_swap: None,
             tx,
             rx,
@@ -118,19 +133,41 @@ impl App {
         self.disc_capacity_secs = next * 60;
     }
 
+    /// What's actually usable per disc after inter-track gaps and the safety
+    /// buffer — see `SAFETY_BUFFER_SECS`.
+    pub fn effective_capacity_secs(&self) -> u64 {
+        self.disc_capacity_secs.saturating_sub(SAFETY_BUFFER_SECS)
+    }
+
+    pub fn inc_target_discs(&mut self) {
+        let base = self.target_disc_count.unwrap_or_else(|| self.disc_groups_indices().len().max(1));
+        self.target_disc_count = Some(base + 1);
+    }
+
+    pub fn dec_target_discs(&mut self) {
+        let base = self.target_disc_count.unwrap_or_else(|| self.disc_groups_indices().len().max(1));
+        self.target_disc_count = Some(base.saturating_sub(1).max(1));
+    }
+
+    pub fn reset_target_discs(&mut self) {
+        self.target_disc_count = None;
+    }
+
     /// Greedily packs *selected* tracks (in original playlist order) into
-    /// discs of `disc_capacity_secs` each. Returns groups of indices into
+    /// discs of `effective_capacity_secs()` each, counting the mandatory
+    /// inter-track gap against every track. Returns groups of indices into
     /// `self.tracks`. A single track longer than one disc's capacity gets
     /// its own (oversized) group rather than being dropped.
     pub fn disc_groups_indices(&self) -> Vec<Vec<usize>> {
+        let cap = self.effective_capacity_secs();
         let mut groups: Vec<Vec<usize>> = vec![Vec::new()];
         let mut cur_secs = 0u64;
         for (i, t) in self.tracks.iter().enumerate() {
             if !t.selected {
                 continue;
             }
-            let dur = t.track.duration.unwrap_or(0);
-            if cur_secs > 0 && cur_secs + dur > self.disc_capacity_secs {
+            let dur = t.track.duration.unwrap_or(0) + TRACK_GAP_SECS;
+            if cur_secs > 0 && cur_secs + dur > cap {
                 groups.push(Vec::new());
                 cur_secs = 0;
             }
@@ -143,17 +180,45 @@ impl App {
         groups
     }
 
+    /// If a target disc count is set and the current selection needs more
+    /// discs than that, returns (discs_needed, seconds_over_budget) so the
+    /// UI can tell the user exactly how much to trim.
+    pub fn over_target_budget(&self) -> Option<(usize, u64)> {
+        let target = self.target_disc_count?;
+        let needed = self.disc_groups_indices().len().max(1);
+        if needed <= target {
+            return None;
+        }
+        let budget = target as u64 * self.effective_capacity_secs();
+        let total_with_gaps: u64 = self
+            .tracks
+            .iter()
+            .filter(|t| t.selected)
+            .map(|t| t.track.duration.unwrap_or(0) + TRACK_GAP_SECS)
+            .sum();
+        Some((needed, total_with_gaps.saturating_sub(budget)))
+    }
+
     /// Only tracks that downloaded successfully, grouped per disc in the
-    /// same order `disc_groups_indices` would burn them.
-    pub fn downloaded_disc_groups(&self) -> Vec<Vec<PathBuf>> {
+    /// same order `disc_groups_indices` would burn them, carrying metadata
+    /// along for CD-Text / tracklist generation.
+    pub fn downloaded_disc_groups(&self) -> Vec<Vec<BurnTrack>> {
         self.disc_groups_indices()
             .into_iter()
             .filter_map(|idxs| {
-                let paths: Vec<PathBuf> = idxs
+                let paths: Vec<BurnTrack> = idxs
                     .into_iter()
-                    .filter_map(|i| match &self.tracks[i].status {
-                        TrackStatus::Downloaded(p) => Some(p.clone()),
-                        _ => None,
+                    .filter_map(|i| {
+                        let item = &self.tracks[i];
+                        match &item.status {
+                            TrackStatus::Downloaded(p) => Some(BurnTrack {
+                                path: p.clone(),
+                                artist: item.track.artist_label().to_string(),
+                                title: item.track.title.clone(),
+                                album: item.track.album.clone(),
+                            }),
+                            _ => None,
+                        }
                     })
                     .collect();
                 if paths.is_empty() { None } else { Some(paths) }
@@ -181,11 +246,20 @@ impl App {
                         Err(e) => self.error = Some(e),
                     }
                 }
-                WorkerMsg::TrackDownloaded(idx, path, secs) => {
+                WorkerMsg::TrackDownloaded(idx, path, secs, tags) => {
                     if let Some(t) = self.tracks.get_mut(idx) {
                         t.status = TrackStatus::Downloaded(path);
                         if t.track.duration.is_none() {
                             t.track.duration = Some(secs);
+                        }
+                        if let Some(a) = tags.artist {
+                            t.track.artist = Some(a);
+                        }
+                        if let Some(title) = tags.title {
+                            t.track.title = title;
+                        }
+                        if let Some(album) = tags.album {
+                            t.track.album = Some(album);
                         }
                     }
                 }
@@ -202,7 +276,7 @@ impl App {
                 WorkerMsg::AwaitDiscSwap(disc_num, total) => {
                     self.awaiting_swap = Some((disc_num, total));
                     self.push_log(format!(
-                        "Disc {}/{} done. Insert the next blank CD-R and press Enter.",
+                        "Disc {}/{total} done. Insert the next blank CD-R and press Enter.",
                         disc_num - 1,
                         total
                     ));
@@ -241,8 +315,27 @@ impl App {
         });
     }
 
+    /// Shared guard for the download/burn actions: refuses to proceed while
+    /// the selection needs more discs than the configured target, and
+    /// explains exactly how much to trim instead of silently overflowing.
+    fn enforce_disc_budget(&mut self) -> bool {
+        if let Some((needed, over)) = self.over_target_budget() {
+            self.error = Some(format!(
+                "selection needs {needed} discs but target is {} — remove about {}:{:02} of tracks to fit",
+                self.target_disc_count.unwrap(),
+                over / 60,
+                over % 60
+            ));
+            return false;
+        }
+        true
+    }
+
     pub fn start_download_selected(&mut self) {
         if self.busy {
+            return;
+        }
+        if !self.enforce_disc_budget() {
             return;
         }
         let jobs: Vec<(usize, Track)> = self
@@ -273,13 +366,13 @@ impl App {
             for (idx, track) in jobs {
                 let _ = tx.send(WorkerMsg::Log(format!("[{idx}] downloading: {}", track.title)));
                 match ytdlp::download_track(&track, &out_dir) {
-                    Ok(path) => {
+                    Ok((path, tags)) => {
                         if let Err(e) = convert::verify_cd_spec(&path) {
                             let _ = tx.send(WorkerMsg::TrackFailed(idx, e.to_string()));
                             continue;
                         }
                         let secs = convert::wav_duration_seconds(&path).unwrap_or(0);
-                        let _ = tx.send(WorkerMsg::TrackDownloaded(idx, path, secs));
+                        let _ = tx.send(WorkerMsg::TrackDownloaded(idx, path, secs, tags));
                     }
                     Err(e) => {
                         let _ = tx.send(WorkerMsg::TrackFailed(idx, e.to_string()));
@@ -292,6 +385,9 @@ impl App {
 
     pub fn start_burn(&mut self) {
         if self.busy {
+            return;
+        }
+        if !self.enforce_disc_budget() {
             return;
         }
         let disc_groups = self.downloaded_disc_groups();
@@ -307,8 +403,9 @@ impl App {
         self.screen = Screen::Working;
         let total_discs = disc_groups.len();
         self.push_log(format!(
-            "Starting burn: {total_discs} disc(s), {} track(s) total",
-            disc_groups.iter().map(Vec::len).sum::<usize>()
+            "Starting burn: {total_discs} disc(s), {} track(s) total{}",
+            disc_groups.iter().map(Vec::len).sum::<usize>(),
+            if burn::supports_cd_text() { " (with CD-Text)" } else { " (no CD-Text on Windows — see tracklist.txt)" }
         ));
 
         let (continue_tx, continue_rx) = channel::<()>();

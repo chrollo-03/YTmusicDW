@@ -56,7 +56,7 @@ fn draw_url_input(f: &mut Frame, area: Rect, app: &App) {
 fn draw_track_list(f: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(3)])
+        .constraints([Constraint::Min(3), Constraint::Length(4)])
         .split(area);
 
     // Precompute once per frame: which disc each track index lands on.
@@ -84,10 +84,11 @@ fn draw_track_list(f: &mut Frame, area: Rect, app: &App) {
                 TrackStatus::Downloaded(_) => " (downloaded)".to_string(),
                 TrackStatus::Failed(reason) => format!(" (FAILED: {})", truncate(reason, 40)),
             };
+            let label = format!("{} — {}", t.track.title, t.track.artist_label());
             let line = format!(
-                "{checkbox} {disc_tag:<4}{:>3}  {:<50} {:>6}{status}",
+                "{checkbox} {disc_tag:<4}{:>3}  {:<58} {:>6}{status}",
                 i + 1,
-                truncate(&t.track.title, 50),
+                truncate(&label, 58),
                 t.track.duration_label()
             );
             let style = match t.status {
@@ -110,14 +111,45 @@ fn draw_track_list(f: &mut Frame, area: Rect, app: &App) {
     let selected_n = app.tracks.iter().filter(|t| t.selected).count();
     let n_discs = disc_groups.len().max(1);
     let cap_min = app.disc_capacity_secs / 60;
-    let summary = format!(
-        "{selected_n}/{} tracks selected · {}:{:02} total · {n_discs} disc(s) @ {cap_min}min (press 'c' to change)",
+    let eff = app.effective_capacity_secs();
+    let line1 = format!(
+        "{selected_n}/{} tracks selected · {}:{:02} total · needs {n_discs} disc(s) @ {cap_min}min ('c' to change size)",
         app.tracks.len(),
         total / 60,
         total % 60
     );
-    let p = Paragraph::new(Span::styled(summary, Style::default().fg(Color::Cyan)))
-        .block(Block::default().borders(Borders::ALL));
+
+    let (line2, line2_color) = match app.over_target_budget() {
+        Some((needed, over)) => (
+            format!(
+                "target: {} disc(s) — needs {needed}, OVER by {}:{:02}. Remove tracks to fit ('[' ']' adjust target, '0' auto)",
+                app.target_disc_count.unwrap(),
+                over / 60,
+                over % 60
+            ),
+            Color::Red,
+        ),
+        None => {
+            let target_label = match app.target_disc_count {
+                Some(n) => format!("target: {n} disc(s), fits"),
+                None => "target: auto".to_string(),
+            };
+            (
+                format!(
+                    "{target_label} · effective budget {}:{:02}/disc ({cap_min}min minus 2s track gaps + 30s safety margin) · '[' ']' set target, '0' auto",
+                    eff / 60,
+                    eff % 60
+                ),
+                Color::Green,
+            )
+        }
+    };
+
+    let p = Paragraph::new(vec![
+        Line::from(Span::styled(line1, Style::default().fg(Color::Cyan))),
+        Line::from(Span::styled(line2, Style::default().fg(line2_color))),
+    ])
+    .block(Block::default().borders(Borders::ALL));
     f.render_widget(p, chunks[1]);
 }
 
@@ -162,7 +194,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     let help = match app.screen {
         Screen::UrlInput => "Type URL · Enter: fetch · Esc/Ctrl+C: quit",
         Screen::TrackList => {
-            "↑/↓: move · Space: toggle · a: select all · n: select none · c: cycle disc size · d: download selected · b: burn downloaded · Esc: back · Ctrl+C: quit"
+            "↑/↓ move · Space toggle · a/n all/none · c disc size · [ ] target discs · 0 auto · d download · b burn · Esc back · Ctrl+C quit"
         }
         Screen::Working => {
             if app.awaiting_swap.is_some() {

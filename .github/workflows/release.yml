@@ -30,7 +30,7 @@ jobs:
 
       - name: Install Linux burn deps (build-time only, for docs/tests)
         if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y wodim
+        run: sudo apt-get update && sudo apt-get install -y cdrdao
 
       - uses: dtolnay/rust-toolchain@stable
         with:

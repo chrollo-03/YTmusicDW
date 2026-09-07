@@ -12,6 +12,10 @@ pub struct Track {
     pub title: String,
     /// Duration in whole seconds; None if yt-dlp couldn't tell us (e.g. live streams).
     pub duration: Option<u64>,
+    /// Best-effort metadata, filled in cheaply from the playlist listing and
+    /// then upgraded (if better tags exist) once the track is downloaded.
+    pub artist: Option<String>,
+    pub album: Option<String>,
 }
 
 impl Track {
@@ -25,6 +29,21 @@ impl Track {
             None => "--:--".to_string(),
         }
     }
+
+    pub fn artist_label(&self) -> &str {
+        self.artist.as_deref().unwrap_or("Unknown Artist")
+    }
+}
+
+/// Real tag data recovered from yt-dlp's `--write-info-json` sidecar after a
+/// download. YouTube Music links tend to carry proper `artist`/`track`/`album`
+/// tags; plain YouTube videos usually don't, so callers should fall back to
+/// the uploader name / video title when these are None.
+#[derive(Default)]
+pub struct TrackTags {
+    pub artist: Option<String>,
+    pub title: Option<String>,
+    pub album: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -32,6 +51,8 @@ struct FlatEntry {
     id: String,
     title: Option<String>,
     duration: Option<f64>,
+    uploader: Option<String>,
+    channel: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -41,6 +62,18 @@ struct FlatPlaylist {
     id: Option<String>,
     title: Option<String>,
     duration: Option<f64>,
+    uploader: Option<String>,
+    channel: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct InfoJsonTags {
+    artist: Option<String>,
+    creator: Option<String>,
+    uploader: Option<String>,
+    track: Option<String>,
+    title: Option<String>,
+    album: Option<String>,
 }
 
 /// Confirms `yt-dlp` is reachable on PATH; returns its reported version string.
@@ -83,6 +116,8 @@ pub fn list_playlist(url: &str) -> Result<Vec<Track>> {
                 id: e.id,
                 title: e.title.unwrap_or_else(|| "(untitled)".to_string()),
                 duration: e.duration.map(|d| d.round() as u64),
+                artist: e.uploader.or(e.channel),
+                album: None,
             })
             .collect()
     } else if let Some(id) = parsed.id {
@@ -90,6 +125,8 @@ pub fn list_playlist(url: &str) -> Result<Vec<Track>> {
             id,
             title: parsed.title.unwrap_or_else(|| "(untitled)".to_string()),
             duration: parsed.duration.map(|d| d.round() as u64),
+            artist: parsed.uploader.or(parsed.channel),
+            album: None,
         }]
     } else {
         bail!("that link didn't resolve to any tracks");
@@ -104,10 +141,13 @@ pub fn list_playlist(url: &str) -> Result<Vec<Track>> {
 
 /// Downloads one track's audio and transcodes it to CD-audio spec
 /// (44.1kHz, 16-bit, stereo PCM WAV) via yt-dlp's ffmpeg postprocessor.
-/// Returns the path to the resulting .wav file.
-pub fn download_track(track: &Track, out_dir: &Path) -> Result<PathBuf> {
+/// Also writes an info-json sidecar so real artist/title/album tags (when
+/// YouTube has them — reliable for YouTube Music links, hit-or-miss for
+/// plain videos) can be pulled back into the UI and CD-Text.
+pub fn download_track(track: &Track, out_dir: &Path) -> Result<(PathBuf, TrackTags)> {
     std::fs::create_dir_all(out_dir)?;
-    let out_template = out_dir.join(format!("{}.%(ext)s", sanitize(&track.id)));
+    let base = sanitize(&track.id);
+    let out_template = out_dir.join(format!("{base}.%(ext)s"));
 
     let status = Command::new("yt-dlp")
         .args([
@@ -120,6 +160,7 @@ pub fn download_track(track: &Track, out_dir: &Path) -> Result<PathBuf> {
             "0",
             "--postprocessor-args",
             "ffmpeg:-ar 44100 -ac 2 -sample_fmt s16",
+            "--write-info-json",
             "--no-warnings",
             "-o",
         ])
@@ -132,14 +173,28 @@ pub fn download_track(track: &Track, out_dir: &Path) -> Result<PathBuf> {
         bail!("yt-dlp failed to download \"{}\"", track.title);
     }
 
-    let wav_path = out_dir.join(format!("{}.wav", sanitize(&track.id)));
+    let wav_path = out_dir.join(format!("{base}.wav"));
     if !wav_path.exists() {
         bail!(
             "expected output file missing after download: {}",
             wav_path.display()
         );
     }
-    Ok(wav_path)
+
+    let tags = read_info_json_tags(&out_dir.join(format!("{base}.info.json")));
+    Ok((wav_path, tags))
+}
+
+/// Best-effort: missing/unparsable info-json just means no upgraded tags,
+/// not a failed download.
+fn read_info_json_tags(path: &Path) -> TrackTags {
+    let Ok(bytes) = std::fs::read(path) else { return TrackTags::default() };
+    let Ok(info) = serde_json::from_slice::<InfoJsonTags>(&bytes) else { return TrackTags::default() };
+    TrackTags {
+        artist: info.artist.or(info.creator).or(info.uploader),
+        title: info.track.or(info.title),
+        album: info.album,
+    }
 }
 
 fn sanitize(id: &str) -> String {
