@@ -67,10 +67,10 @@ fn draw_track_list(f: &mut Frame, area: Rect, app: &App) {
         .map(|(i, t)| {
             let checkbox = if t.selected { "[x]" } else { "[ ]" };
             let status = match &t.status {
-                TrackStatus::Pending => "",
-                TrackStatus::Downloading => " (downloading...)",
-                TrackStatus::Downloaded(_) => " (downloaded)",
-                TrackStatus::Failed(_) => " (FAILED)",
+                TrackStatus::Pending => String::new(),
+                TrackStatus::Downloading => " (downloading...)".to_string(),
+                TrackStatus::Downloaded(_) => " (downloaded)".to_string(),
+                TrackStatus::Failed(reason) => format!(" (FAILED: {})", truncate(reason, 40)),
             };
             let line = format!(
                 "{checkbox} {:>3}  {:<50} {:>6}{status}",

@@ -7,12 +7,9 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn burner_binary() -> Option<&'static str> {
-    for bin in ["wodim", "cdrecord"] {
-        if Command::new("which").arg(bin).output().map(|o| o.status.success()).unwrap_or(false) {
-            return Some(bin);
-        }
-    }
-    None
+    ["wodim", "cdrecord"]
+        .into_iter()
+        .find(|bin| Command::new("which").arg(bin).output().map(|o| o.status.success()).unwrap_or(false))
 }
 
 pub fn recorder_present() -> bool {

@@ -49,6 +49,12 @@ pub struct App {
     rx: Receiver<WorkerMsg>,
 }
 
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl App {
     pub fn new() -> Self {
         let (tx, rx) = channel();
@@ -222,6 +228,10 @@ impl App {
         let paths = self.downloaded_paths();
         if paths.is_empty() {
             self.error = Some("no downloaded tracks to burn yet".to_string());
+            return;
+        }
+        if !burn::burner_available() {
+            self.error = Some("no CD/DVD burner detected — plug one in and insert a blank CD-R".to_string());
             return;
         }
         self.busy = true;
