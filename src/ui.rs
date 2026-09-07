@@ -1,10 +1,9 @@
 use crate::app::{App, Screen, TrackStatus};
-use crate::burn;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 
@@ -60,12 +59,25 @@ fn draw_track_list(f: &mut Frame, area: Rect, app: &App) {
         .constraints([Constraint::Min(3), Constraint::Length(3)])
         .split(area);
 
+    // Precompute once per frame: which disc each track index lands on.
+    let disc_groups = app.disc_groups_indices();
+    let mut disc_of: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    for (disc_i, group) in disc_groups.iter().enumerate() {
+        for &idx in group {
+            disc_of.insert(idx, disc_i + 1);
+        }
+    }
+
     let items: Vec<ListItem> = app
         .tracks
         .iter()
         .enumerate()
         .map(|(i, t)| {
             let checkbox = if t.selected { "[x]" } else { "[ ]" };
+            let disc_tag = match disc_of.get(&i) {
+                Some(d) => format!("CD{d}"),
+                None => "  ".to_string(),
+            };
             let status = match &t.status {
                 TrackStatus::Pending => String::new(),
                 TrackStatus::Downloading => " (downloading...)".to_string(),
@@ -73,43 +85,60 @@ fn draw_track_list(f: &mut Frame, area: Rect, app: &App) {
                 TrackStatus::Failed(reason) => format!(" (FAILED: {})", truncate(reason, 40)),
             };
             let line = format!(
-                "{checkbox} {:>3}  {:<50} {:>6}{status}",
+                "{checkbox} {disc_tag:<4}{:>3}  {:<50} {:>6}{status}",
                 i + 1,
                 truncate(&t.track.title, 50),
                 t.track.duration_label()
             );
-            let style = if i == app.cursor {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
-                match t.status {
-                    TrackStatus::Failed(_) => Style::default().fg(Color::Red),
-                    TrackStatus::Downloaded(_) => Style::default().fg(Color::Green),
-                    _ => Style::default(),
-                }
+            let style = match t.status {
+                TrackStatus::Failed(_) => Style::default().fg(Color::Red),
+                TrackStatus::Downloaded(_) => Style::default().fg(Color::Green),
+                _ => Style::default(),
             };
             ListItem::new(line).style(style)
         })
         .collect();
 
-    let list = List::new(items).block(Block::default().title(" Tracks ").borders(Borders::ALL));
-    f.render_widget(list, chunks[0]);
+    let list = List::new(items)
+        .block(Block::default().title(" Tracks ").borders(Borders::ALL))
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    let mut state = ListState::default();
+    state.select(Some(app.cursor));
+    f.render_stateful_widget(list, chunks[0], &mut state);
 
     let total = app.total_selected_seconds();
     let selected_n = app.tracks.iter().filter(|t| t.selected).count();
-    let fits = if burn::fits_on_one_cd(total) { "fits" } else { "OVER 80-min CD-R limit!" };
+    let n_discs = disc_groups.len().max(1);
+    let cap_min = app.disc_capacity_secs / 60;
     let summary = format!(
-        "{selected_n}/{} tracks selected · {}:{:02} total · {fits}",
+        "{selected_n}/{} tracks selected · {}:{:02} total · {n_discs} disc(s) @ {cap_min}min (press 'c' to change)",
         app.tracks.len(),
         total / 60,
         total % 60
     );
-    let color = if burn::fits_on_one_cd(total) { Color::Green } else { Color::Red };
-    let p = Paragraph::new(Span::styled(summary, Style::default().fg(color)))
+    let p = Paragraph::new(Span::styled(summary, Style::default().fg(Color::Cyan)))
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(p, chunks[1]);
 }
 
 fn draw_log(f: &mut Frame, area: Rect, app: &App) {
+    if let Some((next_disc, total)) = app.awaiting_swap {
+        let text = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                format!("Disc {}/{total} burned.", next_disc - 1),
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(format!("Insert a fresh blank CD-R for disc {next_disc}/{total}, then press Enter.")),
+        ];
+        let p = Paragraph::new(text)
+            .block(Block::default().title(" Swap disc ").borders(Borders::ALL))
+            .wrap(Wrap { trim: false });
+        f.render_widget(p, area);
+        return;
+    }
+
     let lines: Vec<Line> = app.log.iter().rev().take(area.height as usize).rev().map(|s| Line::from(s.as_str())).collect();
     let title = if app.busy { " Working... " } else { " Log " };
     let p = Paragraph::new(lines)
@@ -121,7 +150,7 @@ fn draw_log(f: &mut Frame, area: Rect, app: &App) {
 fn draw_done(f: &mut Frame, area: Rect) {
     let p = Paragraph::new(vec![
         Line::from(""),
-        Line::from(Span::styled("Disc burned. Go play it in the car.", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled("Disc(s) burned. Go play them in the car.", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))),
         Line::from(""),
         Line::from("Press 'n' to start another playlist, or 'q' to quit."),
     ])
@@ -133,9 +162,15 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     let help = match app.screen {
         Screen::UrlInput => "Type URL · Enter: fetch · Esc/Ctrl+C: quit",
         Screen::TrackList => {
-            "↑/↓: move · Space: toggle · a: select all · n: select none · d: download selected · b: burn downloaded · Esc: back · Ctrl+C: quit"
+            "↑/↓: move · Space: toggle · a: select all · n: select none · c: cycle disc size · d: download selected · b: burn downloaded · Esc: back · Ctrl+C: quit"
         }
-        Screen::Working => "Ctrl+C: quit",
+        Screen::Working => {
+            if app.awaiting_swap.is_some() {
+                "Enter: continue to next disc · Ctrl+C: quit"
+            } else {
+                "Ctrl+C: quit"
+            }
+        }
         Screen::Done => "n: new playlist · q: quit",
     };
     let p = Paragraph::new(help).block(Block::default().borders(Borders::ALL));

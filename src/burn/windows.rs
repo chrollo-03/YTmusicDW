@@ -24,7 +24,7 @@ fn run_probe_script() -> Result<bool> {
     Ok(n > 0)
 }
 
-pub fn burn(wav_tracks: &[PathBuf], progress: impl Fn(&str)) -> Result<()> {
+pub fn burn(wav_tracks: &[PathBuf], progress: &dyn Fn(&str)) -> Result<()> {
     if !recorder_present() {
         bail!("no CD/DVD recorder detected by Windows (IMAPI2). Plug in the burner and insert a blank CD-R.");
     }

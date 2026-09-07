@@ -32,8 +32,17 @@ pub enum WorkerMsg {
     TrackDownloaded(usize, PathBuf, u64),
     TrackFailed(usize, String),
     DownloadBatchDone,
+    /// Burn thread finished disc `n` (1-based) of `total` and is waiting for
+    /// the user to swap in a fresh blank before continuing.
+    AwaitDiscSwap(usize, usize),
     BurnDone(Result<(), String>),
 }
+
+/// Common blank CD-R ratings, in minutes. 'c' cycles through these in the UI
+/// since 74-minute discs are just as common as 80-minute ones and the two
+/// aren't interchangeable — burning past a disc's actual rated capacity
+/// either fails outright or relies on unsupported overburning.
+pub const CAPACITY_PRESETS_MIN: [u64; 3] = [74, 80, 90];
 
 pub struct App {
     pub screen: Screen,
@@ -45,8 +54,15 @@ pub struct App {
     pub should_quit: bool,
     pub busy: bool,
     pub error: Option<String>,
+    /// Per-disc capacity, in seconds. Selected tracks are greedily packed
+    /// into discs of this size, in playlist order.
+    pub disc_capacity_secs: u64,
+    /// Set while the burn thread has finished one disc and is blocked
+    /// waiting for the user to insert the next blank. (next_disc, total_discs)
+    pub awaiting_swap: Option<(usize, usize)>,
     tx: Sender<WorkerMsg>,
     rx: Receiver<WorkerMsg>,
+    continue_tx: Option<Sender<()>>,
 }
 
 impl Default for App {
@@ -69,8 +85,11 @@ impl App {
             should_quit: false,
             busy: false,
             error: None,
+            disc_capacity_secs: burn::MAX_CD_SECONDS,
+            awaiting_swap: None,
             tx,
             rx,
+            continue_tx: None,
         }
     }
 
@@ -87,6 +106,59 @@ impl App {
             .filter(|t| t.selected)
             .filter_map(|t| t.track.duration)
             .sum()
+    }
+
+    pub fn cycle_disc_capacity(&mut self) {
+        let cur_min = self.disc_capacity_secs / 60;
+        let idx = CAPACITY_PRESETS_MIN.iter().position(|&m| m == cur_min);
+        let next = match idx {
+            Some(i) => CAPACITY_PRESETS_MIN[(i + 1) % CAPACITY_PRESETS_MIN.len()],
+            None => CAPACITY_PRESETS_MIN[0],
+        };
+        self.disc_capacity_secs = next * 60;
+    }
+
+    /// Greedily packs *selected* tracks (in original playlist order) into
+    /// discs of `disc_capacity_secs` each. Returns groups of indices into
+    /// `self.tracks`. A single track longer than one disc's capacity gets
+    /// its own (oversized) group rather than being dropped.
+    pub fn disc_groups_indices(&self) -> Vec<Vec<usize>> {
+        let mut groups: Vec<Vec<usize>> = vec![Vec::new()];
+        let mut cur_secs = 0u64;
+        for (i, t) in self.tracks.iter().enumerate() {
+            if !t.selected {
+                continue;
+            }
+            let dur = t.track.duration.unwrap_or(0);
+            if cur_secs > 0 && cur_secs + dur > self.disc_capacity_secs {
+                groups.push(Vec::new());
+                cur_secs = 0;
+            }
+            groups.last_mut().unwrap().push(i);
+            cur_secs += dur;
+        }
+        if groups.last().is_some_and(|g| g.is_empty()) {
+            groups.pop();
+        }
+        groups
+    }
+
+    /// Only tracks that downloaded successfully, grouped per disc in the
+    /// same order `disc_groups_indices` would burn them.
+    pub fn downloaded_disc_groups(&self) -> Vec<Vec<PathBuf>> {
+        self.disc_groups_indices()
+            .into_iter()
+            .filter_map(|idxs| {
+                let paths: Vec<PathBuf> = idxs
+                    .into_iter()
+                    .filter_map(|i| match &self.tracks[i].status {
+                        TrackStatus::Downloaded(p) => Some(p.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                if paths.is_empty() { None } else { Some(paths) }
+            })
+            .collect()
     }
 
     /// Non-blocking: drains any messages the worker thread sent since last tick.
@@ -127,8 +199,17 @@ impl App {
                     self.busy = false;
                     self.push_log("All downloads finished.");
                 }
+                WorkerMsg::AwaitDiscSwap(disc_num, total) => {
+                    self.awaiting_swap = Some((disc_num, total));
+                    self.push_log(format!(
+                        "Disc {}/{} done. Insert the next blank CD-R and press Enter.",
+                        disc_num - 1,
+                        total
+                    ));
+                }
                 WorkerMsg::BurnDone(res) => {
                     self.busy = false;
+                    self.awaiting_swap = None;
                     match res {
                         Ok(()) => {
                             self.push_log("Burn finished successfully.");
@@ -209,24 +290,12 @@ impl App {
         });
     }
 
-    /// Only tracks that downloaded successfully, in original playlist order.
-    pub fn downloaded_paths(&self) -> Vec<PathBuf> {
-        self.tracks
-            .iter()
-            .filter(|t| t.selected)
-            .filter_map(|t| match &t.status {
-                TrackStatus::Downloaded(p) => Some(p.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
     pub fn start_burn(&mut self) {
         if self.busy {
             return;
         }
-        let paths = self.downloaded_paths();
-        if paths.is_empty() {
+        let disc_groups = self.downloaded_disc_groups();
+        if disc_groups.is_empty() {
             self.error = Some("no downloaded tracks to burn yet".to_string());
             return;
         }
@@ -236,16 +305,36 @@ impl App {
         }
         self.busy = true;
         self.screen = Screen::Working;
-        self.push_log(format!("Starting burn of {} track(s)...", paths.len()));
+        let total_discs = disc_groups.len();
+        self.push_log(format!(
+            "Starting burn: {total_discs} disc(s), {} track(s) total",
+            disc_groups.iter().map(Vec::len).sum::<usize>()
+        ));
+
+        let (continue_tx, continue_rx) = channel::<()>();
+        self.continue_tx = Some(continue_tx);
 
         let tx = self.tx.clone();
         thread::spawn(move || {
-            let tx2 = tx.clone();
-            let res = burn::burn_audio_cd(&paths, move |msg| {
-                let _ = tx2.send(WorkerMsg::Log(msg.to_string()));
-            })
-            .map_err(|e| e.to_string());
+            let tx_progress = tx.clone();
+            let progress = move |msg: &str| {
+                let _ = tx_progress.send(WorkerMsg::Log(msg.to_string()));
+            };
+            let tx_swap = tx.clone();
+            let mut await_swap = move |disc_num: usize, total: usize| {
+                let _ = tx_swap.send(WorkerMsg::AwaitDiscSwap(disc_num, total));
+                let _ = continue_rx.recv(); // blocks until confirm_disc_swap() fires
+            };
+            let res = burn::burn_audio_cds(&disc_groups, &progress, &mut await_swap).map_err(|e| e.to_string());
             let _ = tx.send(WorkerMsg::BurnDone(res));
         });
+    }
+
+    /// Called when the user presses Enter after swapping in the next blank disc.
+    pub fn confirm_disc_swap(&mut self) {
+        if let Some(tx) = self.continue_tx.take() {
+            let _ = tx.send(());
+        }
+        self.awaiting_swap = None;
     }
 }

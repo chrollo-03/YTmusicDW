@@ -22,7 +22,7 @@ pub fn recorder_present() -> bool {
         .unwrap_or(false)
 }
 
-pub fn burn(wav_tracks: &[PathBuf], progress: impl Fn(&str)) -> Result<()> {
+pub fn burn(wav_tracks: &[PathBuf], progress: &dyn Fn(&str)) -> Result<()> {
     let bin = burner_binary().ok_or_else(|| {
         anyhow::anyhow!("neither `wodim` nor `cdrecord` found. On Ubuntu: `sudo apt install wodim`")
     })?;

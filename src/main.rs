@@ -104,9 +104,14 @@ fn handle_key(app: &mut App, code: KeyCode) {
             }
             KeyCode::Char('d') => app.start_download_selected(),
             KeyCode::Char('b') => app.start_burn(),
+            KeyCode::Char('c') => app.cycle_disc_capacity(),
             _ => {}
         },
-        Screen::Working => {}
+        Screen::Working => {
+            if app.awaiting_swap.is_some() && code == KeyCode::Enter {
+                app.confirm_disc_swap();
+            }
+        }
         Screen::Done => match code {
             KeyCode::Char('q') => app.should_quit = true,
             KeyCode::Char('n') => {
