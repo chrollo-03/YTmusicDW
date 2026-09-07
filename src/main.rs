@@ -15,13 +15,39 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 use std::time::Duration;
 
-fn main() -> Result<()> {
+fn main() {
+    // Double-clicking the exe on Windows spawns a throwaway console that
+    // closes the instant the process exits — any eprintln! here is gone
+    // before it can be read unless we explicitly pause first.
     if let Err(e) = ytdlp::check_available() {
         eprintln!("yt-dlp is not available on PATH: {e:#}");
-        eprintln!("Install it first (e.g. `winget install yt-dlp.yt-dlp` on Windows, `apt install yt-dlp` on Linux).");
+        eprintln!("Install it first:");
+        eprintln!("  Windows (64-bit): winget install yt-dlp.yt-dlp");
+        eprintln!("  Windows (32-bit): download yt-dlp_x86.exe from");
+        eprintln!("    https://github.com/yt-dlp/yt-dlp/releases, rename it to yt-dlp.exe, put it on PATH");
+        eprintln!("  Linux: apt install yt-dlp (or pip install yt-dlp)");
+        pause_before_exit_on_windows();
         std::process::exit(1);
     }
 
+    if let Err(e) = run_app() {
+        eprintln!("ytmusicdw exited with an error: {e:#}");
+        pause_before_exit_on_windows();
+        std::process::exit(1);
+    }
+}
+
+#[cfg(windows)]
+fn pause_before_exit_on_windows() {
+    eprintln!("\nPress Enter to close this window...");
+    let mut buf = String::new();
+    let _ = std::io::stdin().read_line(&mut buf);
+}
+
+#[cfg(not(windows))]
+fn pause_before_exit_on_windows() {}
+
+fn run_app() -> Result<()> {
     enable_raw_mode().context("failed to enable terminal raw mode")?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
