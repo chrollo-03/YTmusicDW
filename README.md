@@ -78,6 +78,24 @@ Windows SmartScreen will still warn on first run; verify authenticity with
 gh attestation verify ytmusicdw-windows-x86_64.exe --owner <owner>
 ```
 
+**Windows: pick the right exe for your CPU/OS bitness.** Check
+Settings → System → About → "System type":
+
+- `ytmusicdw-windows-x86_64.exe` — 64-bit Windows (the normal case; this is
+  what almost every PC from the last ~15 years runs, including old laptops
+  like a Toshiba with a Pentium B960 that shipped with 64-bit Windows 7/10).
+- `ytmusicdw-windows-x86_32bit.exe` — only if "System type" literally says
+  **32-bit operating system**. Running the 64-bit exe there fails with
+  "This app can't run on your PC" — that error is purely about binary
+  format, not CPU power. On a genuinely 32-bit Windows you'll also need
+  32-bit builds of the two external tools:
+  - yt-dlp: grab `yt-dlp_x86.exe` from the
+    [yt-dlp releases page](https://github.com/yt-dlp/yt-dlp/releases),
+    rename it to `yt-dlp.exe`, put it on PATH.
+  - ffmpeg: grab an `x86` (not `x86_64`) build from
+    [yt-dlp/FFmpeg-Builds releases](https://github.com/yt-dlp/FFmpeg-Builds/releases)
+    (built specifically for yt-dlp compatibility), extract `ffmpeg.exe` onto PATH.
+
 Or build from source:
 
 ```sh

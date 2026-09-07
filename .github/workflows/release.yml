@@ -20,6 +20,10 @@ jobs:
             target: x86_64-pc-windows-msvc
             artifact_name: ytmusicdw.exe
             asset_name: ytmusicdw-windows-x86_64.exe
+          - os: windows-latest
+            target: i686-pc-windows-msvc
+            artifact_name: ytmusicdw.exe
+            asset_name: ytmusicdw-windows-x86_32bit.exe
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact_name: ytmusicdw
