@@ -275,10 +275,9 @@ impl App {
                 }
                 WorkerMsg::AwaitDiscSwap(disc_num, total) => {
                     self.awaiting_swap = Some((disc_num, total));
+                    let just_finished = disc_num - 1;
                     self.push_log(format!(
-                        "Disc {}/{total} done. Insert the next blank CD-R and press Enter.",
-                        disc_num - 1,
-                        total
+                        "Disc {just_finished}/{total} done. Insert the next blank CD-R and press Enter."
                     ));
                 }
                 WorkerMsg::BurnDone(res) => {
